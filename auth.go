@@ -9,9 +9,12 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginabi"
@@ -26,7 +29,10 @@ const (
 	loginSubmitPath = "/v0/management/plugins/" + pluginID + "/login"
 )
 
-var pendingLoginStates sync.Map
+var (
+	pendingLoginStates   sync.Map
+	observedPublicOrigin atomic.Value
+)
 
 type pendingLogin struct {
 	expiresAt time.Time
@@ -145,17 +151,126 @@ func buildAuthDataFromCredential(cred storedCredential, fileName string) (plugin
 	}, nil
 }
 
+func isLoopbackHost(host string) bool {
+	h := strings.ToLower(strings.TrimSpace(host))
+	if idx := strings.IndexByte(h, ':'); idx != -1 {
+		h = h[:idx]
+	}
+	return h == "" || h == "127.0.0.1" || h == "localhost" || h == "::1"
+}
+
+func observeOriginFromHeaders(headers http.Header) {
+	if len(headers) == 0 {
+		return
+	}
+	xfHost := strings.TrimSpace(strings.Split(headers.Get("X-Forwarded-Host"), ",")[0])
+	if xfHost != "" && !isLoopbackHost(xfHost) {
+		scheme := strings.TrimSpace(strings.Split(headers.Get("X-Forwarded-Proto"), ",")[0])
+		if scheme == "" {
+			scheme = "https"
+		}
+		observedPublicOrigin.Store(scheme + "://" + xfHost)
+		return
+	}
+	for _, hdr := range []string{"Origin", "Referer"} {
+		if raw := strings.TrimSpace(headers.Get(hdr)); raw != "" {
+			if u, err := url.Parse(raw); err == nil && u.Scheme != "" && u.Host != "" && !isLoopbackHost(u.Host) {
+				observedPublicOrigin.Store(u.Scheme + "://" + u.Host)
+				return
+			}
+		}
+	}
+}
+
+func detectOriginFromLogFiles() string {
+	for _, dir := range []string{"/CLIProxyAPI/logs", "logs"} {
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			continue
+		}
+		var newestPath string
+		var newestMod time.Time
+		for _, entry := range entries {
+			if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".log") {
+				continue
+			}
+			info, errInfo := entry.Info()
+			if errInfo != nil {
+				continue
+			}
+			if newestPath == "" || info.ModTime().After(newestMod) {
+				newestMod = info.ModTime()
+				newestPath = filepath.Join(dir, entry.Name())
+			}
+		}
+		if newestPath == "" {
+			continue
+		}
+		f, errOpen := os.Open(newestPath)
+		if errOpen != nil {
+			continue
+		}
+		buf := make([]byte, 8192)
+		n, _ := f.Read(buf)
+		_ = f.Close()
+		if n <= 0 {
+			continue
+		}
+		var xfHost, xfProto string
+		for _, line := range strings.Split(string(buf[:n]), "\n") {
+			line = strings.TrimSpace(line)
+			if strings.HasPrefix(strings.ToLower(line), "x-forwarded-host:") {
+				xfHost = strings.TrimSpace(strings.Split(line[len("x-forwarded-host:"):], ",")[0])
+			} else if strings.HasPrefix(strings.ToLower(line), "x-forwarded-proto:") {
+				xfProto = strings.TrimSpace(strings.Split(line[len("x-forwarded-proto:"):], ",")[0])
+			}
+		}
+		if xfHost != "" && !isLoopbackHost(xfHost) {
+			if xfProto == "" {
+				xfProto = "https"
+			}
+			origin := xfProto + "://" + xfHost
+			observedPublicOrigin.Store(origin)
+			return origin
+		}
+	}
+	return ""
+}
+
+func resolveLoginOrigin(fallbackBaseURL string) (*url.URL, error) {
+	if pub := strings.TrimSpace(currentConfig().PublicURL); pub != "" {
+		if u, err := url.Parse(pub); err == nil && u.Scheme != "" && u.Host != "" {
+			return u, nil
+		}
+	}
+	if obs, ok := observedPublicOrigin.Load().(string); ok && obs != "" {
+		if u, err := url.Parse(obs); err == nil && u.Scheme != "" && u.Host != "" {
+			return u, nil
+		}
+	}
+	if fromLogs := detectOriginFromLogFiles(); fromLogs != "" {
+		if u, err := url.Parse(fromLogs); err == nil && u.Scheme != "" && u.Host != "" {
+			return u, nil
+		}
+	}
+	base, errBase := url.Parse(strings.TrimSpace(fallbackBaseURL))
+	if errBase != nil {
+		return nil, fmt.Errorf("parse auth.login.start BaseURL %q: %w", fallbackBaseURL, errBase)
+	}
+	if base.Scheme == "" || base.Host == "" {
+		return nil, fmt.Errorf("auth.login.start BaseURL %q has no scheme or host", fallbackBaseURL)
+	}
+	return base, nil
+}
+
 func handleAuthLoginStart(raw []byte) ([]byte, error) {
 	var req rpcAuthLoginStartRequest
 	if errUnmarshal := json.Unmarshal(raw, &req); errUnmarshal != nil {
 		return nil, errUnmarshal
 	}
-	base, errBase := url.Parse(strings.TrimSpace(req.BaseURL))
+	base, errBase := resolveLoginOrigin(req.BaseURL)
 	if errBase != nil {
-		return nil, fmt.Errorf("parse auth.login.start BaseURL %q: %w", req.BaseURL, errBase)
-	}
-	if base.Scheme == "" || base.Host == "" {
-		return nil, fmt.Errorf("auth.login.start BaseURL %q has no scheme or host", req.BaseURL)
+		return nil, errBase
 	}
 
 	stateRaw := make([]byte, 32)

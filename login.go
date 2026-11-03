@@ -37,11 +37,23 @@ func managementRegistrationPayload() managementRegistration {
 	}
 }
 
+func handleResponseInterceptAfter(raw []byte) ([]byte, error) {
+	var req pluginapi.ResponseInterceptRequest
+	if len(raw) > 0 {
+		if errUnmarshal := json.Unmarshal(raw, &req); errUnmarshal != nil {
+			return nil, errUnmarshal
+		}
+	}
+	observeOriginFromHeaders(req.RequestHeaders)
+	return okEnvelope(pluginapi.ResponseInterceptResponse{})
+}
+
 func handleManagement(raw []byte) ([]byte, error) {
 	var req pluginapi.ManagementRequest
 	if errUnmarshal := json.Unmarshal(raw, &req); errUnmarshal != nil {
 		return nil, errUnmarshal
 	}
+	observeOriginFromHeaders(req.Headers)
 	switch strings.ToUpper(req.Method) {
 	case http.MethodGet:
 		return okEnvelope(pluginapi.ManagementResponse{
@@ -107,7 +119,7 @@ button:disabled { opacity: 0.6; cursor: default; }
 <main>
 <h1>Experiential Labs login</h1>
 <form id="login">
-<label>Management key <input type="password" id="mgmtKey" autocomplete="off" required></label>
+<label id="mgmtWrap" style="display:none;">Management key <input type="password" id="mgmtKey" autocomplete="off"></label>
 <label>Experiential Labs API key <input type="password" id="apiKey" placeholder="xpl_..." autocomplete="off" required></label>
 <button type="submit" id="submit">Submit</button>
 </form>
@@ -117,20 +129,72 @@ button:disabled { opacity: 0.6; cursor: default; }
 const form = document.getElementById('login');
 const statusEl = document.getElementById('status');
 const submitBtn = document.getElementById('submit');
+const mgmtWrap = document.getElementById('mgmtWrap');
+const mgmtInput = document.getElementById('mgmtKey');
+
+function deobfuscateCPASecret(payload) {
+  const prefix = 'enc::v1::';
+  if (!payload || !payload.startsWith(prefix)) return payload;
+  try {
+    const bin = atob(payload.slice(prefix.length));
+    const data = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) data[i] = bin.charCodeAt(i);
+    const keyStr = 'cli-proxy-api-webui::secure-storage|' + window.location.host + '|' + navigator.userAgent;
+    const keyBytes = new TextEncoder().encode(keyStr);
+    const out = new Uint8Array(data.length);
+    for (let i = 0; i < data.length; i++) out[i] = data[i] ^ keyBytes[i % keyBytes.length];
+    return new TextDecoder().decode(out);
+  } catch (_) {
+    return payload;
+  }
+}
+
+function detectStoredManagementKey() {
+  try {
+    const authRaw = localStorage.getItem('cli-proxy-auth');
+    if (authRaw) {
+      const parsed = JSON.parse(authRaw);
+      const k = parsed && parsed.state && parsed.state.managementKey;
+      if (k && typeof k === 'string' && k.trim()) return k.trim();
+    }
+    const legacy = localStorage.getItem('managementKey');
+    if (legacy) {
+      const dec = deobfuscateCPASecret(legacy);
+      try {
+        const parsed = JSON.parse(dec);
+        if (typeof parsed === 'string' && parsed.trim()) return parsed.trim();
+      } catch (_) {
+        if (typeof dec === 'string' && dec.trim()) return dec.trim();
+      }
+    }
+  } catch (_) {}
+  return '';
+}
+
+const initialKey = detectStoredManagementKey();
+if (initialKey) {
+  mgmtInput.value = initialKey;
+} else {
+  mgmtWrap.style.display = 'grid';
+}
+
 form.addEventListener('submit', async (event) => {
   event.preventDefault();
   const state = new URLSearchParams(window.location.search).get('state') || '';
-  const mgmtKey = document.getElementById('mgmtKey').value.trim();
+  const mgmtKey = (mgmtInput.value || detectStoredManagementKey()).trim();
   const apiKey = document.getElementById('apiKey').value.trim();
   submitBtn.disabled = true;
   statusEl.className = '';
   statusEl.textContent = 'Submitting...';
   const response = await fetch('/v0/management/plugins/experiential-labs/login', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + mgmtKey },
+    headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + mgmtKey, 'X-Management-Key': mgmtKey },
     body: JSON.stringify({ state: state, api_key: apiKey }),
   });
   const text = await response.text();
+  if (response.status === 401 || response.status === 403) {
+    mgmtWrap.style.display = 'grid';
+  }
   if (!response.ok) {
     statusEl.className = 'error';
     statusEl.textContent = 'Failed (HTTP ' + response.status + '): ' + text;
