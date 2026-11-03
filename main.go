@@ -74,7 +74,7 @@ const (
 	pluginID      = "experiential-labs"
 	providerID    = "experiential-labs"
 	pluginName    = "Experiential Labs"
-	pluginVersion = "0.1.0"
+	pluginVersion = "0.1.1"
 	pluginAuthor  = "esauvisky"
 	pluginRepo    = "https://github.com/esauvisky/CLIProxyAPI-Experiential-Labs-Plugin"
 	pluginLogo    = "https://raw.githubusercontent.com/esauvisky/CLIProxyAPI-Experiential-Labs-Plugin/main/assets/logo.png"
@@ -195,7 +195,7 @@ func pluginRegistration() registration {
 			ExecutorModelScope:    pluginapi.ExecutorModelScopeOAuth,
 			ExecutorInputFormats:  []string{"openai", "claude", "openai-response"},
 			ExecutorOutputFormats: []string{"openai", "claude", "openai-response"},
-			ManagementAPI:         false,
+			ManagementAPI:         true,
 			QuotaProvider:         true,
 		},
 	}
@@ -269,6 +269,15 @@ func handleMethod(method string, request []byte) ([]byte, error) {
 		return okEnvelope(map[string]string{"identifier": providerID})
 	case pluginabi.MethodAuthParse:
 		return handleAuthParse(request)
+	case pluginabi.MethodAuthLoginStart:
+		return handleAuthLoginStart(request)
+	case pluginabi.MethodAuthLoginPoll:
+		return handleAuthLoginPoll(request)
+
+	case pluginabi.MethodManagementRegister:
+		return okEnvelope(managementRegistrationPayload())
+	case pluginabi.MethodManagementHandle:
+		return handleManagement(request)
 
 	case pluginabi.MethodModelForAuth:
 		return handleModelForAuth(request)

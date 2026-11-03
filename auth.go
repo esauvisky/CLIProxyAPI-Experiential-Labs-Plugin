@@ -2,19 +2,46 @@ package main
 
 import (
 	"bytes"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
 	"regexp"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginabi"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
 )
 
 var apiKeyPattern = regexp.MustCompile(`^xpl_[0-9a-fA-F]{32,}$`)
+
+const (
+	loginStateTTL   = 15 * time.Minute
+	loginPagePath   = "/v0/resource/plugins/" + pluginID + "/login"
+	loginSubmitPath = "/v0/management/plugins/" + pluginID + "/login"
+)
+
+var pendingLoginStates sync.Map
+
+type pendingLogin struct {
+	expiresAt time.Time
+	apiKey    string
+}
+
+type rpcAuthLoginStartRequest struct {
+	pluginapi.AuthLoginStartRequest
+	HostCallbackID string `json:"host_callback_id,omitempty"`
+}
+
+type rpcAuthLoginPollRequest struct {
+	pluginapi.AuthLoginPollRequest
+	HostCallbackID string `json:"host_callback_id,omitempty"`
+}
 
 type storedCredential struct {
 	APIKey string `json:"api_key,omitempty"`
@@ -116,6 +143,84 @@ func buildAuthDataFromCredential(cred storedCredential, fileName string) (plugin
 			"base_url": currentConfig().BaseURL,
 		},
 	}, nil
+}
+
+func handleAuthLoginStart(raw []byte) ([]byte, error) {
+	var req rpcAuthLoginStartRequest
+	if errUnmarshal := json.Unmarshal(raw, &req); errUnmarshal != nil {
+		return nil, errUnmarshal
+	}
+	base, errBase := url.Parse(strings.TrimSpace(req.BaseURL))
+	if errBase != nil {
+		return nil, fmt.Errorf("parse auth.login.start BaseURL %q: %w", req.BaseURL, errBase)
+	}
+	if base.Scheme == "" || base.Host == "" {
+		return nil, fmt.Errorf("auth.login.start BaseURL %q has no scheme or host", req.BaseURL)
+	}
+
+	stateRaw := make([]byte, 32)
+	if _, errRand := rand.Read(stateRaw); errRand != nil {
+		return nil, fmt.Errorf("generate Experiential Labs login state: %w", errRand)
+	}
+	stateKey := hex.EncodeToString(stateRaw)
+	expiresAt := time.Now().UTC().Add(loginStateTTL)
+	pendingLoginStates.Store(stateKey, pendingLogin{expiresAt: expiresAt})
+
+	return okEnvelope(pluginapi.AuthLoginStartResponse{
+		Provider:  providerID,
+		URL:       base.Scheme + "://" + base.Host + loginPagePath + "?state=" + stateKey,
+		State:     stateKey,
+		ExpiresAt: expiresAt,
+	})
+}
+
+func loadPendingLogin(stateKey string) (pendingLogin, error) {
+	loaded, ok := pendingLoginStates.Load(stateKey)
+	if !ok {
+		return pendingLogin{}, statusError{
+			code:       "invalid_login_state",
+			message:    "unknown Experiential Labs login state",
+			httpStatus: http.StatusBadRequest,
+		}
+	}
+	pending := loaded.(pendingLogin)
+	if time.Now().UTC().After(pending.expiresAt) {
+		pendingLoginStates.Delete(stateKey)
+		return pendingLogin{}, statusError{
+			code:       "expired_login_state",
+			message:    "Experiential Labs login state expired",
+			httpStatus: http.StatusBadRequest,
+		}
+	}
+	return pending, nil
+}
+
+func handleAuthLoginPoll(raw []byte) ([]byte, error) {
+	var req rpcAuthLoginPollRequest
+	if errUnmarshal := json.Unmarshal(raw, &req); errUnmarshal != nil {
+		return nil, errUnmarshal
+	}
+	stateKey := strings.TrimSpace(req.State)
+	pending, errPending := loadPendingLogin(stateKey)
+	if errPending != nil {
+		return nil, errPending
+	}
+	if pending.apiKey == "" {
+		return okEnvelope(pluginapi.AuthLoginPollResponse{
+			Status:  pluginapi.AuthLoginStatusPending,
+			Message: "Waiting for the Experiential Labs API key to be submitted",
+		})
+	}
+	authData, errBuild := buildAuthDataFromCredential(storedCredential{APIKey: pending.apiKey}, "")
+	if errBuild != nil {
+		return nil, errBuild
+	}
+	pendingLoginStates.Delete(stateKey)
+	return okEnvelope(pluginapi.AuthLoginPollResponse{
+		Status:  pluginapi.AuthLoginStatusSuccess,
+		Message: "Experiential Labs login complete",
+		Auth:    authData,
+	})
 }
 
 func doHostHTTP(hostCallbackID, method, targetURL string, headers http.Header, body []byte) (pluginapi.HTTPResponse, error) {

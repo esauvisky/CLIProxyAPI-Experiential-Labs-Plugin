@@ -6,7 +6,7 @@
       "name": "Experiential Labs",
       "description": "Adds the Experiential Labs gateway (api.experientiallabs.ai) as an API-key provider. Lists the models your xpl_ key can call from GET /v1/models and routes each documented model to its wire protocol: OpenAI Chat Completions, OpenAI Responses, or Anthropic Messages.",
       "author": "esauvisky",
-      "version": "0.1.0",
+      "version": "0.1.1",
       "repository": "https://github.com/esauvisky/CLIProxyAPI-Experiential-Labs-Plugin",
       "homepage": "https://github.com/esauvisky/CLIProxyAPI-Experiential-Labs-Plugin",
       "logo": "https://raw.githubusercontent.com/esauvisky/CLIProxyAPI-Experiential-Labs-Plugin/main/assets/logo.png",
