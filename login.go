@@ -134,43 +134,23 @@ const submitBtn = document.getElementById('submit');
 const mgmtWrap = document.getElementById('mgmtWrap');
 const mgmtInput = document.getElementById('mgmtKey');
 
-function deobfuscateCPASecret(payload) {
-  const prefix = 'enc::v1::';
-  if (!payload || !payload.startsWith(prefix)) return payload;
-  try {
-    const bin = atob(payload.slice(prefix.length));
-    const data = new Uint8Array(bin.length);
-    for (let i = 0; i < bin.length; i++) data[i] = bin.charCodeAt(i);
-    const keyStr = 'cli-proxy-api-webui::secure-storage|' + window.location.host + '|' + navigator.userAgent;
-    const keyBytes = new TextEncoder().encode(keyStr);
-    const out = new Uint8Array(data.length);
-    for (let i = 0; i < data.length; i++) out[i] = data[i] ^ keyBytes[i % keyBytes.length];
-    return new TextDecoder().decode(out);
-  } catch (_) {
-    return payload;
+function deobfuscateCPAStore(payload) {
+  const prefix = 'enc::v2::';
+  if (!payload.startsWith(prefix)) {
+    throw new Error('cli-proxy-auth is not in the enc::v2:: format this page understands');
   }
+  const bin = atob(payload.slice(prefix.length));
+  const keyBytes = new TextEncoder().encode('cli-proxy-api-webui::secure-storage|' + window.location.host);
+  const out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i) ^ keyBytes[i % keyBytes.length];
+  return new TextDecoder().decode(out);
 }
 
 function detectStoredManagementKey() {
-  try {
-    const authRaw = localStorage.getItem('cli-proxy-auth');
-    if (authRaw) {
-      const parsed = JSON.parse(authRaw);
-      const k = parsed && parsed.state && parsed.state.managementKey;
-      if (k && typeof k === 'string' && k.trim()) return k.trim();
-    }
-    const legacy = localStorage.getItem('managementKey');
-    if (legacy) {
-      const dec = deobfuscateCPASecret(legacy);
-      try {
-        const parsed = JSON.parse(dec);
-        if (typeof parsed === 'string' && parsed.trim()) return parsed.trim();
-      } catch (_) {
-        if (typeof dec === 'string' && dec.trim()) return dec.trim();
-      }
-    }
-  } catch (_) {}
-  return '';
+  const authRaw = localStorage.getItem('cli-proxy-auth');
+  if (authRaw === null) return '';
+  const k = JSON.parse(deobfuscateCPAStore(authRaw)).state.managementKey;
+  return typeof k === 'string' ? k.trim() : '';
 }
 
 const initialKey = detectStoredManagementKey();
