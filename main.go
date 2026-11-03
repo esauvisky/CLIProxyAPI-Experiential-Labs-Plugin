@@ -74,7 +74,7 @@ const (
 	pluginID      = "experiential-labs"
 	providerID    = "experiential-labs"
 	pluginName    = "Experiential Labs"
-	pluginVersion = "0.1.2"
+	pluginVersion = "0.1.3"
 	pluginAuthor  = "esauvisky"
 	pluginRepo    = "https://github.com/esauvisky/CLIProxyAPI-Experiential-Labs-Plugin"
 	pluginLogo    = "https://raw.githubusercontent.com/esauvisky/CLIProxyAPI-Experiential-Labs-Plugin/main/assets/logo.png"

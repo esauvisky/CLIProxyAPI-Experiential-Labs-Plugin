@@ -9,8 +9,6 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
-	"os"
-	"path/filepath"
 	"regexp"
 	"strings"
 	"sync"
@@ -182,61 +180,6 @@ func observeOriginFromHeaders(headers http.Header) {
 	}
 }
 
-func detectOriginFromLogFiles() string {
-	for _, dir := range []string{"/CLIProxyAPI/logs", "logs"} {
-		entries, err := os.ReadDir(dir)
-		if err != nil {
-			continue
-		}
-		var newestPath string
-		var newestMod time.Time
-		for _, entry := range entries {
-			if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".log") {
-				continue
-			}
-			info, errInfo := entry.Info()
-			if errInfo != nil {
-				continue
-			}
-			if newestPath == "" || info.ModTime().After(newestMod) {
-				newestMod = info.ModTime()
-				newestPath = filepath.Join(dir, entry.Name())
-			}
-		}
-		if newestPath == "" {
-			continue
-		}
-		f, errOpen := os.Open(newestPath)
-		if errOpen != nil {
-			continue
-		}
-		buf := make([]byte, 8192)
-		n, _ := f.Read(buf)
-		_ = f.Close()
-		if n <= 0 {
-			continue
-		}
-		var xfHost, xfProto string
-		for _, line := range strings.Split(string(buf[:n]), "\n") {
-			line = strings.TrimSpace(line)
-			if strings.HasPrefix(strings.ToLower(line), "x-forwarded-host:") {
-				xfHost = strings.TrimSpace(strings.Split(line[len("x-forwarded-host:"):], ",")[0])
-			} else if strings.HasPrefix(strings.ToLower(line), "x-forwarded-proto:") {
-				xfProto = strings.TrimSpace(strings.Split(line[len("x-forwarded-proto:"):], ",")[0])
-			}
-		}
-		if xfHost != "" && !isLoopbackHost(xfHost) {
-			if xfProto == "" {
-				xfProto = "https"
-			}
-			origin := xfProto + "://" + xfHost
-			observedPublicOrigin.Store(origin)
-			return origin
-		}
-	}
-	return ""
-}
-
 func resolveLoginOrigin(fallbackBaseURL string) (*url.URL, error) {
 	if pub := strings.TrimSpace(currentConfig().PublicURL); pub != "" {
 		if u, err := url.Parse(pub); err == nil && u.Scheme != "" && u.Host != "" {
@@ -245,11 +188,6 @@ func resolveLoginOrigin(fallbackBaseURL string) (*url.URL, error) {
 	}
 	if obs, ok := observedPublicOrigin.Load().(string); ok && obs != "" {
 		if u, err := url.Parse(obs); err == nil && u.Scheme != "" && u.Host != "" {
-			return u, nil
-		}
-	}
-	if fromLogs := detectOriginFromLogFiles(); fromLogs != "" {
-		if u, err := url.Parse(fromLogs); err == nil && u.Scheme != "" && u.Host != "" {
 			return u, nil
 		}
 	}

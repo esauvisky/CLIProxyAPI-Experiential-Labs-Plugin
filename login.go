@@ -54,21 +54,23 @@ func handleManagement(raw []byte) ([]byte, error) {
 		return nil, errUnmarshal
 	}
 	observeOriginFromHeaders(req.Headers)
-	switch strings.ToUpper(req.Method) {
-	case http.MethodGet:
-		return okEnvelope(pluginapi.ManagementResponse{
-			StatusCode: http.StatusOK,
-			Headers: http.Header{
-				"Content-Type":  []string{"text/html; charset=utf-8"},
-				"Cache-Control": []string{"no-store"},
-			},
-			Body: []byte(loginPageHTML),
-		})
-	case http.MethodPost:
-		return handleLoginSubmit(req.Body)
-	default:
+	cleanedPath := strings.TrimRight(strings.TrimSpace(req.Path), "/")
+	if strings.HasSuffix(cleanedPath, "/plugins/"+pluginID+"/login") {
+		if strings.EqualFold(req.Method, http.MethodPost) {
+			return handleLoginSubmit(req.Body)
+		}
 		return nil, fmt.Errorf("unsupported method %s for %s", req.Method, req.Path)
 	}
+
+	// /v0/resource/plugins/experiential-labs/login serves only the static UI asset.
+	return okEnvelope(pluginapi.ManagementResponse{
+		StatusCode: http.StatusOK,
+		Headers: http.Header{
+			"Content-Type":  []string{"text/html; charset=utf-8"},
+			"Cache-Control": []string{"no-store"},
+		},
+		Body: []byte(loginPageHTML),
+	})
 }
 
 func handleLoginSubmit(body []byte) ([]byte, error) {
